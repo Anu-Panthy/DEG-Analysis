@@ -1,0 +1,528 @@
+---
+title: "DEG Analysis_Lab8"
+author: "ANU"
+date: "2026-03-24"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r} 
+#first data observation
+
+setwd("D:/DEG Analysis_Lab8")
+getwd()
+
+``` 
+
+
+```{r}
+# Load library
+library(gtools)
+
+# Create a sorted list of text files
+filelist <- sort(list.files(pattern = "\\.count\\.txt$"))
+
+# Read the count data from the file list
+data_list <- lapply(filelist, function(fn) {
+  df <- read.delim(fn, header = FALSE, sep = "\t")
+  df[, ncol(df)]   # ← THIS is the fix
+})
+
+countdata <- do.call(cbind, data_list)
+
+rownames(countdata) <- read.delim(filelist[1], header = FALSE, sep = "\t")[, 1]
+
+colnames(countdata) <- sub(".count.txt", "", filelist)
+
+mode(countdata) <- "numeric"
+
+# Combine data into a matrix
+countdata <- do.call(cbind, data_list)
+
+# Use the first column of a sample file as row names
+rownames(countdata) <- read.delim(filelist[1], header = FALSE, sep = "\t")[, 1]
+
+# Assign column names based on file names
+colnames(countdata) <- sub(".count.txt", "", filelist)
+
+# Convert data to numeric
+mode(countdata) <- "numeric"
+
+# Remove the last 5 rows showing the summary
+countdata <- countdata[-c((nrow(countdata)-4):nrow(countdata)),]
+
+# View the data
+head(countdata)
+tail(countdata)
+View(countdata)
+
+# Extract sample names
+sample.names <- colnames(countdata)
+
+# Create coldata table
+
+coldata <- data.frame(
+  name = sample.names,
+  condition = rep(c("control", "treated"), each = 2, times = 2),
+  sample = rep(c("A", "B"), each = 4)
+)
+
+# Convert to factors (required by DESeq2)
+coldata$condition <- factor(coldata$condition)
+coldata$sample <- factor(coldata$sample)
+
+# View the coldata table
+coldata
+
+# Save the table
+write.csv(coldata, file="coldata.csv", row.names = FALSE)
+
+# Load library (install if necessary)
+library(DESeq2)
+
+# Make a data frame form a matrix
+dds <- DESeqDataSetFromMatrix(
+countData = countdata,
+colData = coldata,
+design = ~ condition + sample)
+
+# Check dds
+
+# Check the size factors calculated by geometric mean
+dds.SF <- estimateSizeFactors(dds) 
+print(sizeFactors(dds.SF))
+
+# Extract the normalized counts as transcript levels
+Normalizedcount <- counts(dds.SF, normalized = T)
+head(Normalizedcount)
+
+# Save the normalized counts
+write.csv(Normalizedcount, file="Normalized_counts.csv", row.names = TRUE)
+
+# Assign colors for conditions
+group.col <- c("skyblue","orange")[coldata$condition]
+
+#Plot the log2-transformed counts before and after normalization
+png(filename = "plot_counts.png", width = 12, height = 6, units = "in",  res = 300 )
+par(mfrow=c(1,2), mar = c(5, 10, 5, 5))
+
+boxplot(log2(counts(dds.SF, normalized=FALSE)+1),
+xlab="log2(counts+1)", main="Raw counts" , las = 1, 
+horizontal = TRUE, pch = ",", col = group.col)
+
+boxplot(log2(counts(dds.SF, normalized=TRUE)+1), 
+xlab="log2(normalized counts+1)", main="Normalized counts", las = 1, 
+horizontal = TRUE, pch = ",", col = group.col)
+
+dev.off() # Close the graphics device
+# Load libraries
+library(gplots)
+library(ggplot2)
+
+# Variance-Stabilizing Transformation (VST)
+transformed_data <- vst(dds, blind = TRUE)
+
+# Calculate sample distance based on transformed data
+sampleDists <- dist( t( assay(transformed_data) ) )
+
+# Convert the distances into a matrix
+sampleDistMatrix <- as.matrix( sampleDists )
+
+# Use a color palette.
+colours <- colorRampPalette(c("blue", "white"))(100)
+
+# Create a heatmap for the sample distance
+heatmap(  
+sampleDistMatrix,  
+Rowv = NA,  # Disable row dendrogram  
+Colv = NA,  # Disable column dendrogram  
+col = colours,  # Apply custom colors  
+margins = c(12, 12),  # Adjust margins  
+main = "Sample distance"  
+)
+# Generate PCA data
+pcaData <- plotPCA(transformed_data, intgroup = c("sample", "condition"), returnData = TRUE)
+
+# Retrieve the percentage of variance explained by PC1 and PC2
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Create PCA Plot with ggplot2
+PCA <- ggplot(pcaData, aes(PC1, PC2, color = condition, shape = sample)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1 (", percentVar[1], "%) ")) +
+  ylab(paste0("PC2 (", percentVar[2], "%) ")) +
+scale_color_manual(values = c("skyblue", "orange")) 
+
+PCA 	# view the plot
+
+# Save the PCA plot as a PNG file using ggsave.
+ggsave("../PCA_plot.png", plot = PCA, width = 5, height = 4, dpi = 300)
+
+
+# Create a copy of the dataset
+ddsFiltered <- dds.SF
+
+# Define filtering criteria (only genes with sufficient expression (normalized counts ≥ 10) in at least 2 samples are retained.)
+filterGenes <- rowSums(counts(ddsFiltered, normalized = TRUE) >= 10) >= 2
+
+# Apply the filter to retain only genes meeting the criteria
+ddsFiltered <- ddsFiltered[filterGenes, ]
+
+# Update Design Formula including interaction terms between sample and condition.
+design(ddsFiltered) <- ~ sample + condition + sample:condition
+
+# Run DESeq2 for normalization, dispersion estimation, and model fitting.
+ddsFiltered <- DESeq(ddsFiltered)
+
+# Check the DESeq2 comparisons
+resultsNames(ddsFiltered)
+
+# Extract Results for Sample A
+resSampleA <- results(ddsFiltered, name = "condition_treated_vs_control")
+summary(resSampleA)
+
+# Extract Results for Sample B
+resSampleB <- results(ddsFiltered, name = "sampleB.conditiontreated")
+summary(resSampleB)
+
+# Filter significant DEGs for Sample A
+sigDEGs_A <- subset(resSampleA, padj<0.05 & abs(log2FoldChange) > 1)
+sigDEGs_A
+write.csv(as.data.frame(sigDEGs_A), file = "SampleA_DEGs.csv")
+
+# Filter significant DEGs for Sample B
+sigDEGs_B <- subset(resSampleB, padj < 0.05 & abs(log2FoldChange) > 1)
+sigDEGs_B
+write.csv(as.data.frame(sigDEGs_B), file = "SampleB_DEGs.csv")
+
+# Remove rows with NA in adjusted P values
+resSampleA <- resSampleA[!is.na(resSampleA$padj), ]
+
+# Prepare data for Sample A
+resSampleA$Significance <- ifelse(resSampleA$padj < 0.05 & abs(resSampleA$log2FoldChange) > 1, "Significant", "Not Significant")
+
+# Create the plot after loading ggplot2
+volcanoA <- ggplot(resSampleA, aes(x = log2FoldChange, y = -log10(padj), color = Significance)) +  
+geom_point(alpha = 0.8, size = 1.5) +  
+scale_color_manual(values = c("Significant" = "red", "Not Significant" = "gray")) +  
+labs(title = "Sample A",       
+x = "Log2 Fold Change",      
+y = "-Log10 Adjusted P-value")
+
+volcanoA
+
+
+#Prepare normalized count data with coldata.
+
+library(Rmisc)
+
+# Read and process normalized counts
+NormalizedCount <- read.csv("Normalized_counts.csv", row.names = 1)
+NC_t <- cbind(name = rownames(t(NormalizedCount)), t(NormalizedCount))
+
+# Load coldata and restore 'name' column
+coldata <- read.csv("coldata.csv", header = TRUE, row.names = 1)
+coldata$name <- rownames(coldata)
+
+# Merge coldata with normalized counts
+NC_col <- merge(coldata, NC_t, by = "name")
+
+# Ensure all columns from the 4th to the last are numeric
+NC_col[, 4:ncol(NC_col)] <- lapply(NC_col[, 4:ncol(NC_col)], function(x) as.numeric(as.character(x)))
+
+# Summarize data for a gene
+# Summarize data for an example gene, Glyma_13G122766
+Glyma_13G122766.sum <- summarySE(NC_col, measurevar = "Glyma_13G122766", groupvars = c("sample", "condition"))
+
+# Check the summary
+Glyma_13G122766.sum
+
+# Create the plot for Glyma_13G122766
+Glyma_13G122766 <- ggplot(Glyma_13G122766.sum, aes(x = sample, y = Glyma_13G122766, fill = condition)) +
+geom_bar(position = position_dodge(), stat = "identity", color = "grey20") +
+  labs(y = "Transcript levels\n(normalized counts)", 
+       x = "Sample", 
+       title = "Glyma_13G122766") +
+  geom_errorbar(aes(ymin = Glyma_13G122766, ymax = Glyma_13G122766 + sd),
+ linewidth = 0.3, color = "grey20", width = 0.2, position = position_dodge(0.9)) +
+  scale_fill_manual(values = c("skyblue", "orange"),
+                    breaks = c("control", "treated"))
+
+Glyma_13G122766  # check the plot
+
+# Save the plot as a PNG file
+ggsave(filename = "Glyma_13G122766.png",
+       plot = Glyma_13G122766, 
+       width = 4, height = 4, units = "in", dpi = 300)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+# ==============================
+# Step 1: Pick one DEG
+# ==============================
+
+head(sigDEGs_A)
+
+gene <- rownames(sigDEGs_A)[1]
+gene
+
+
+# ==============================
+# Step 2: Load packages
+# ==============================
+
+# Install only first time (comment after)
+# install.packages("Rmisc")
+
+library(Rmisc)
+library(ggplot2)
+
+
+# ==============================
+# Step 3: Prepare data (FIXED)
+# ==============================
+
+# Read normalized counts
+NormalizedCount <- read.csv("Normalized_counts.csv", row.names = 1)
+
+# 🔥 IMPORTANT: correct transpose
+NC_t <- as.data.frame(t(NormalizedCount))
+
+# Add sample names column
+NC_t$name <- rownames(NC_t)
+
+
+# Read coldata correctly (NO row.names=1)
+coldata <- read.csv("coldata.csv", header = TRUE)
+
+
+# Merge
+NC_col <- merge(coldata, NC_t, by = "name")
+
+
+# ==============================
+# Step 4: Convert to numeric
+# ==============================
+
+NC_col[, 4:ncol(NC_col)] <- lapply(
+  NC_col[, 4:ncol(NC_col)],
+  function(x) as.numeric(x)
+)
+
+
+# ==============================
+# Step 5: Check (VERY IMPORTANT)
+# ==============================
+
+# Make sure gene exists
+print(gene)
+
+# Check columns
+colnames(NC_col)[1:10]
+
+
+# ==============================
+# Step 6: Summarize gene
+# ==============================
+
+gene.sum <- summarySE(
+  NC_col,
+  measurevar = gene,
+  groupvars = c("sample", "condition")
+)
+
+gene.sum
+
+
+# ==============================
+# Step 7: Plot (correct + clean)
+# ==============================
+
+gene.plot <- ggplot(
+  gene.sum,
+  aes(x = sample, y = !!as.name(gene), fill = condition)
+) +
+  geom_bar(stat = "identity",
+           position = position_dodge(),
+           color = "black") +
+  geom_errorbar(
+    aes(
+      ymin = !!as.name(gene) - sd,
+      ymax = !!as.name(gene) + sd
+    ),
+    width = 0.2,
+    position = position_dodge(0.9)
+  ) +
+  scale_fill_manual(values = c("skyblue", "orange")) +
+  labs(
+    title = paste("Expression of", gene),
+    x = "Sample",
+    y = "Normalized Counts"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 12),
+    legend.title = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# Show plot
+gene.plot
+
+
+# ==============================
+# Step 8: Save plot
+# ==============================
+
+ggsave(
+  filename = paste0(gene, "_plot.png"),
+  plot = gene.plot,
+  width = 4,
+  height = 4,
+  dpi = 300
+)
+
+
+
+
+
+
+
+
+
+
+```
+
+
+
+
+
+```{r}
+genes_A <- rownames(sigDEGs_A)
+genes_B <- rownames(sigDEGs_B)
+
+genes_A
+genes_B
+
+cat(rownames(sigDEGs_A), sep = "\n")
+
+```
+
+
+
+```{r}
+sigDEGs_A <- sigDEGs_A[order(sigDEGs_A$log2FoldChange, decreasing = TRUE), ]
+
+up_genes <- rownames(sigDEGs_A[sigDEGs_A$log2FoldChange > 0, ])
+length(up_genes)
+
+down_genes <- rownames(sigDEGs_A[sigDEGs_A$log2FoldChange < 0, ])
+length(down_genes)
+
+
+write.table(up_genes, "up_genes.txt",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+write.table(down_genes, "down_genes.txt",
+            row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+
+head(up_genes)
+head(down_genes)
+cat(up_genes, sep = "\n")
+
+colnames(sigDEGs_A)
+
+
+sigDEGs_A$log2FoldChange > 0
+
+summary(sigDEGs_A$log2FoldChange)
+up_genes
+
+
+
+up_genes
+
+```
+
+
+```{r}
+library(tinytex)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
